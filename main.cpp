@@ -5,7 +5,9 @@
 #include <vector>
 #include "rapidjson/document.h"
 #include "rapidjson/writer.h"
+#include <rapidjson/prettywriter.h>
 #include "rapidjson/stringbuffer.h"
+#include "ip2region_util.h"
 
 // PCAP全局文件头
 struct PcapHeader {
@@ -119,9 +121,14 @@ void printPacket(const Packet &packet) {
     pktObj.AddMember("file_offset", packet.file_offset, allocator);
     pktObj.AddMember("cap_len", packet.cap_len, allocator);
 
+    // 添加 IP 归属地信息
+    pktObj.AddMember("src_location", rapidjson::Value(IP2RegionUtil::getIpLocation(packet.src_ip).c_str(), allocator), allocator);
+    pktObj.AddMember("dst_location", rapidjson::Value(IP2RegionUtil::getIpLocation(packet.dst_ip).c_str(), allocator), allocator);
+
     // 序列化为 JSON 字符串
     rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    // rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
     pktObj.Accept(writer);
 
     // 打印JSON输出
@@ -148,6 +155,9 @@ bool readPacketHex(const std::string& filePath, const uint32_t offset, const uin
 
 int main()
 {
+    IP2RegionUtil ip2RegionUtil;
+    ip2RegionUtil.init("ip2region/ip2region.xdb");
+
     const std::string packet_file = "/home/ync/Downloads/packets.pcap";
     const std::string command = "/usr/bin/tshark -r " + packet_file + " -T fields -e frame.number -e frame.time -e frame.cap_len -e ip.src -e ipv6.src -e ip.dst -e ipv6.dst -e tcp.srcport -e udp.srcport -e tcp.dstport -e udp.dstport -e _ws.col.Protocol -e _ws.col.Info";
 
