@@ -10,9 +10,14 @@ include_directories("${PROJECT_SOURCE_DIR}/lib")
 add_executable(C_C__
         main.cpp
         ip2region_util.cpp
+        ip2region_util.h
+        tshark_manager.cpp
+        tshark_manager.h
+        tshark_datatype.h
         lib/ip2region/xdb_bench.cc
         lib/ip2region/xdb_search.cc
-        ip2region_util.h
+        lib/loguru/loguru.cpp
+        lib/loguru/loguru.hpp
 )
 
 # 把IP数据库文件复制到编译输出目录

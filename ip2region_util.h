@@ -11,6 +11,7 @@
 class IP2RegionUtil {
 public:
     static bool init(const std::string& xdbFilePath);
+    static void uninit();
     static std::string getIpLocation(const std::string& ip);
 
 private:
