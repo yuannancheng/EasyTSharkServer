@@ -35,6 +35,9 @@ public:
     // 获取指定编号数据包的十六进制数据
     bool getPacketHexData(uint32_t frameNumber, std::vector<unsigned char> &data);
 
+    // 枚举网卡列表
+    std::vector<AdapterInfo> getNetworkAdapters();
+
 private:
     // 解析每一行
     static bool parseLine(std::string line, const std::shared_ptr<Packet>& packet);

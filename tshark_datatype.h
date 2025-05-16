@@ -9,6 +9,13 @@
 #include <cstring>
 #include <vector>
 
+#ifdef _WIN32
+// 使用宏来处理Windows和Unix的不同popen实现
+#define popen _popen
+#define pclose _pclose
+#endif
+
+// 数据包
 struct Packet {
     int frame_number;
     std::string time;
@@ -27,7 +34,6 @@ struct Packet {
     uint32_t file_offset;
 };
 
-
 // PCAP全局文件头
 struct PcapHeader {
     uint32_t magic_number;
@@ -45,4 +51,11 @@ struct PacketHeader {
     uint32_t ts_usec;
     uint32_t caplen;
     uint32_t len;
+};
+
+// 网卡信息
+struct AdapterInfo {
+    int id; // 编号
+    std::string name; // 名称
+    std::string remark; // 括号里面的名称
 };

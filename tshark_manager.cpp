@@ -5,23 +5,27 @@
 #include "tshark_manager.h"
 #include <chrono>
 #include <iomanip>
+#include <ranges>
+#include <set>
 #include <sstream>
 #include <string>
 #include <loguru/loguru.hpp>
 
 // 传入工作路径workDir
-TsharkManager::TsharkManager(const std::string& workDir) {
+TsharkManager::TsharkManager(const std::string& workDir)
+{
     this->tsharkPath = "/usr/bin/tshark";
     const std::string xdbPath = workDir + "/lib/ip2region/ip2region.xdb";
     IP2RegionUtil::init(xdbPath);
 }
 
-TsharkManager::~TsharkManager() {
+TsharkManager::~TsharkManager()
+{
     IP2RegionUtil::uninit();
 }
 
-bool TsharkManager::analysisFile(const std::string& filePath) {
-
+bool TsharkManager::analysisFile(const std::string& filePath)
+{
     const std::vector<std::string> tsharkArgs = {
         tsharkPath,
         "-r", filePath,
@@ -45,13 +49,15 @@ bool TsharkManager::analysisFile(const std::string& filePath) {
     };
 
     std::string command;
-    for (const auto& arg : tsharkArgs) {
+    for (const auto& arg : tsharkArgs)
+    {
         command += arg;
         command += " ";
     }
 
     FILE* pipe = popen(command.c_str(), "r");
-    if (!pipe) {
+    if (!pipe)
+    {
         LOG_F(ERROR, "Failed to run tshark command!");
         return false;
     }
@@ -60,9 +66,11 @@ bool TsharkManager::analysisFile(const std::string& filePath) {
 
     // 当前处理的报文在文件中的偏移，第一个报文的偏移就是全局文件头24(也就是sizeof(PcapHeader))字节
     uint32_t file_offset = sizeof(PcapHeader);
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+    {
         std::shared_ptr<Packet> packet = std::make_shared<Packet>();
-        if (!parseLine(buffer, packet)) {
+        if (!parseLine(buffer, packet))
+        {
             LOG_F(ERROR, "%s", buffer);
             assert(false);
         }
@@ -91,8 +99,10 @@ bool TsharkManager::analysisFile(const std::string& filePath) {
     return true;
 }
 
-bool TsharkManager::parseLine(std::string line, const std::shared_ptr<Packet>& packet) {
-    if (line.back() == '\n') {
+bool TsharkManager::parseLine(std::string line, const std::shared_ptr<Packet>& packet)
+{
+    if (line.back() == '\n')
+    {
         line.pop_back();
     }
     std::stringstream ss(line);
@@ -101,7 +111,8 @@ bool TsharkManager::parseLine(std::string line, const std::shared_ptr<Packet>& p
 
     // 自己实现字符串拆分
     size_t start = 0, end;
-    while ((end = line.find('\t', start)) != std::string::npos) {
+    while ((end = line.find('\t', start)) != std::string::npos)
+    {
         fields.push_back(line.substr(start, end - start));
         start = end + 1;
     }
@@ -125,7 +136,8 @@ bool TsharkManager::parseLine(std::string line, const std::shared_ptr<Packet>& p
     // 14: _ws.col.Protocol
     // 15: _ws.col.Info
 
-    if (fields.size() >= 16) {
+    if (fields.size() >= 16)
+    {
         packet->frame_number = std::stoi(fields[0]);
         packet->time = fields[1];
         packet->len = std::stoi(fields[2]);
@@ -134,29 +146,34 @@ bool TsharkManager::parseLine(std::string line, const std::shared_ptr<Packet>& p
         packet->dst_mac = fields[5];
         packet->src_ip = fields[6].empty() ? fields[7] : fields[6];
         packet->dst_ip = fields[8].empty() ? fields[9] : fields[8];
-        if (!fields[10].empty() || !fields[11].empty()) {
+        if (!fields[10].empty() || !fields[11].empty())
+        {
             packet->src_port = std::stoi(fields[10].empty() ? fields[11] : fields[10]);
         }
 
-        if (!fields[12].empty() || !fields[13].empty()) {
+        if (!fields[12].empty() || !fields[13].empty())
+        {
             packet->dst_port = std::stoi(fields[12].empty() ? fields[13] : fields[12]);
         }
         packet->protocol = fields[14];
         packet->info = fields[15];
 
         return true;
-    } else {
+    }
+    else
+    {
         return false;
     }
 }
 
 // 格式化时间戳
-std::string formatTimestamp(const std::string& timestampStr) {
-    double timestamp = std::stod(timestampStr);  // 转换为 double 类型时间戳
+std::string formatTimestamp(const std::string& timestampStr)
+{
+    double timestamp = std::stod(timestampStr); // 转换为 double 类型时间戳
     std::time_t seconds = static_cast<std::time_t>(timestamp);
     int microseconds = static_cast<int>((timestamp - seconds) * 1'000'000);
 
-    std::tm tm_time = *std::localtime(&seconds);  // 转换为本地时间结构
+    std::tm tm_time = *std::localtime(&seconds); // 转换为本地时间结构
 
     std::ostringstream oss;
     oss << std::put_time(&tm_time, "%Y-%m-%d %H:%M:%S")
@@ -167,12 +184,11 @@ std::string formatTimestamp(const std::string& timestampStr) {
 
 void TsharkManager::printAllPackets()
 {
-
     // 使用C++11引入的新式for循环，通过auto关键字，让编译器自动推导其类型
     // 冒号后面跟一个数据容器，通过这种方式，可以来遍历这个容器中的每一项
     // 比通过传统的迭代器来遍历容器写法更加简洁
-    for (auto& pair : allPackets) {
-
+    for (auto& pair : allPackets)
+    {
         std::shared_ptr<Packet> packet = pair.second;
 
         // 构建JSON对象
@@ -209,19 +225,22 @@ void TsharkManager::printAllPackets()
 bool TsharkManager::getPacketHexData(uint32_t frameNumber, std::vector<unsigned char>& data)
 {
     // 获取指定编号数据包的信息
-    if (allPackets.find(frameNumber) == allPackets.end()) {
+    if (allPackets.find(frameNumber) == allPackets.end())
+    {
         LOG_F(ERROR, "找不到编号为 %d 的数据包", frameNumber);
         return false;
     }
     std::shared_ptr<Packet> packet = allPackets[frameNumber];
 
     std::ifstream file(currentFilePath, std::ios::binary);
-    if (!file) {
+    if (!file)
+    {
         return false;
     }
 
     file.seekg(packet->file_offset, std::ios::beg);
-    if (!file) {
+    if (!file)
+    {
         return false;
     }
 
@@ -231,3 +250,79 @@ bool TsharkManager::getPacketHexData(uint32_t frameNumber, std::vector<unsigned 
     return true;
 }
 
+std::vector<AdapterInfo> TsharkManager::getNetworkAdapters()
+{
+    // 需要过滤掉的虚拟网卡，这些不是真实的网卡。tshark -D命令可能会输出这些，把它过滤掉
+    std::set<std::string> specialInterfaces = {"sshdump", "ciscodump", "udpdump", "randpkt"};
+
+    // 枚举到的网卡列表
+    std::vector<AdapterInfo> interfaces;
+
+    const std::string command = tsharkPath + " -D";
+
+    FILE* pipe = popen(command.c_str(), "r");
+    if (!pipe)
+    {
+        throw std::runtime_error("Failed to run tshark command.");
+    }
+
+    char buffer[256] = {0};
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+    {
+        std::string line(buffer);
+        // 去掉末尾换行符
+        if (!line.empty() && line.back() == '\n')
+        {
+            line.pop_back();
+        }
+
+        auto first = line.find(' ');
+        if (first == std::string::npos)
+        {
+            continue;
+        }
+
+        int id = std::stoi(line.substr(0, first - 1));
+        std::string interfaceName;
+        std::string remark;
+        auto second = line.find(' ', first + 1);
+        if (second == std::string::npos)
+        {
+            // 只有2段,第二段就是名字
+            interfaceName = line.substr(first + 1);
+        }
+        else
+        {
+            // 有三段,把最后一个拿到前面,中间的放到后面
+            interfaceName = line.substr(second + 1);
+            remark = line.substr(first + 1, second - first - 1);
+        }
+
+        // 滤掉特殊网卡
+        if (
+            specialInterfaces.find(interfaceName) != specialInterfaces.end() ||
+            specialInterfaces.find(remark) != specialInterfaces.end()
+        )
+        {
+            continue;
+        }
+
+        // 清理第一段的前后空格
+        interfaceName = interfaceName.starts_with('(') ? interfaceName.erase(0, 1) : interfaceName;
+        if (interfaceName.ends_with(')')) interfaceName.pop_back();
+
+        // 假如第二段是 \ 开头,则是Windows输出,那么清空
+        remark = remark.starts_with('\\') ? "" : remark;
+
+        AdapterInfo adapterInfo;
+        adapterInfo.name = interfaceName;
+        adapterInfo.id = id;
+        adapterInfo.remark = remark;
+
+        interfaces.push_back(adapterInfo);
+    }
+
+    pclose(pipe);
+
+    return interfaces;
+}
