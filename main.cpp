@@ -19,14 +19,29 @@ int main(int argc, char* argv[])
     InitLog(argc, argv);
 
     TsharkManager tsharkManager("/home/ync/_project/EasyTSharkServer");
-    tsharkManager.analysisFile("/home/ync/_project/EasyTSharkServer/packets.pcap");
+    tsharkManager.startCapture("docker0"); // wlp1s0
 
+    // 主线程进入命令等待停止抓包
+    std::string input;
+    while (true)
+    {
+        std::cout << "请输入q退出抓包: ";
+        std::cin >> input;
+        if (input == "q")
+        {
+            tsharkManager.stopCapture();
+            break;
+        }
+    }
+
+    // 打印所有捕获到的数据包信息
     tsharkManager.printAllPackets();
 
-    std::vector<AdapterInfo> adaptors = tsharkManager.getNetworkAdapters();
-    for (auto item : adaptors) {
-        LOG_F(INFO, "网卡[%d]: name[%s] remark[%s]", item.id, item.name.c_str(), item.remark.c_str());
-    }
+    // 列出网卡列表
+    // std::vector<AdapterInfo> adaptors = tsharkManager.getNetworkAdapters();
+    // for (auto item : adaptors) {
+    //     LOG_F(INFO, "网卡[%d]: name[%s] remark[%s]", item.id, item.name.c_str(), item.remark.c_str());
+    // }
 
 
     return 0;

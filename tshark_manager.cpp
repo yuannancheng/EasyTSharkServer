@@ -9,6 +9,9 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #include <loguru/loguru.hpp>
 
 // 传入工作路径workDir
@@ -325,4 +328,142 @@ std::vector<AdapterInfo> TsharkManager::getNetworkAdapters()
     pclose(pipe);
 
     return interfaces;
+}
+
+// 开始抓包
+bool TsharkManager::startCapture(std::string adapterName)
+{
+    LOG_F(INFO, "即将开始抓包，网卡：%s", adapterName.c_str());
+
+    // 关闭停止标记
+    stopFlag = false;
+
+    // 启动抓包线程
+    captureWorkThread = std::make_shared<std::thread>(&TsharkManager::captureWorkThreadEntry, this,
+                                                      "\"" + adapterName + "\"");
+
+    return true;
+}
+
+// 停止抓包
+bool TsharkManager::stopCapture()
+{
+    LOG_F(INFO, "即将停止抓包");
+    stopFlag = true;
+    captureWorkThread->join(); // 使用join方法等待抓包线程的退出，会阻塞当前线程
+
+    return true;
+}
+
+void TsharkManager::captureWorkThreadEntry(std::string adapterName)
+{
+    std::string captureFile = "capture.pcap";
+    std::vector<std::string> tsharkArgs = {
+        tsharkPath,
+        "-i", adapterName.c_str(),
+        "-w", captureFile, // 默认将采集到的数据包写入到这个文件下
+        "-F", "pcap", // 指定存储的格式为PCAP格式
+        "-T", "fields",
+        "-e", "frame.number",
+        "-e", "frame.time_epoch",
+        "-e", "frame.len",
+        "-e", "frame.cap_len",
+        "-e", "eth.src",
+        "-e", "eth.dst",
+        "-e", "ip.src",
+        "-e", "ipv6.src",
+        "-e", "ip.dst",
+        "-e", "ipv6.dst",
+        "-e", "tcp.srcport",
+        "-e", "udp.srcport",
+        "-e", "tcp.dstport",
+        "-e", "udp.dstport",
+        "-e", "_ws.col.Protocol",
+        "-e", "_ws.col.Info",
+    };
+
+    std::string command;
+    for (auto arg : tsharkArgs)
+    {
+        command += arg;
+        command += " ";
+    }
+
+    FILE* pipe = popen(command.c_str(), "r");
+    if (!pipe)
+    {
+        LOG_F(ERROR, "Failed to run tshark command!");
+        return;
+    }
+
+
+    int fd = fileno(pipe); // 获取文件描述符
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); // 设为非阻塞
+
+    char buffer[4096];
+
+    // 当前处理的报文在文件中的偏移，第一个报文的偏移就是全局文件头24(也就是sizeof(PcapHeader))字节
+    uint32_t file_offset = sizeof(PcapHeader);
+    while (!stopFlag)
+    {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(fd, &readfds);
+
+        // 设置超时（例如 1s）
+        struct timeval timeout = {1, 0}; // 1s
+        int ret = select(fd + 1, &readfds, nullptr, nullptr, &timeout);
+
+        printf("select ret: %d, stopFlag: %d\n", ret, stopFlag);
+
+        if (ret == -1) break; // 错误
+        if (ret == 0) continue; // 超时，检查 stopFlag
+
+        if (ret > 0 && FD_ISSET(fd, &readfds))
+        // 数据可读
+        {
+            if (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+            {
+                printf("fgets: %s", buffer);
+                // 在线采集的时候过滤额外的信息
+                std::string line = buffer;
+                if (
+                    line.find("Capturing on") != std::string::npos ||
+                    line.find("packets captured") != std::string::npos
+                )
+                {
+                    continue;
+                }
+
+                std::shared_ptr<Packet> packet = std::make_shared<Packet>();
+                if (!parseLine(buffer, packet))
+                {
+                    LOG_F(ERROR, "%s", buffer);
+                    assert(false);
+                }
+
+                // 计算当前报文的偏移，然后记录在Packet对象中
+                packet->file_offset = file_offset + sizeof(PacketHeader);
+
+                // 更新偏移游标
+                file_offset = file_offset + sizeof(PacketHeader) + packet->cap_len;
+
+                // 获取IP地理位置
+                packet->src_location = IP2RegionUtil::getIpLocation(packet->src_ip);
+                packet->dst_location = IP2RegionUtil::getIpLocation(packet->dst_ip);
+
+                // 将分析的数据包插入保存起来
+                allPackets.insert(std::make_pair<>(packet->frame_number, packet));
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    pclose(pipe);
+
+    // 记录当前分析的文件路径
+    currentFilePath = captureFile;
 }

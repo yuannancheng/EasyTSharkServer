@@ -16,8 +16,8 @@
 #include <sstream>
 #include <iostream>
 #include <fstream>
+#include <thread>
 #include <unordered_map>
-
 
 
 class TsharkManager {
@@ -38,11 +38,20 @@ public:
     // 枚举网卡列表
     std::vector<AdapterInfo> getNetworkAdapters();
 
+    // 开始抓包
+    bool startCapture(std::string adapterName);
+
+    // 停止抓包
+    bool stopCapture();	
+
 private:
     // 解析每一行
     static bool parseLine(std::string line, const std::shared_ptr<Packet>& packet);
 
+    // tshark程序路径
     std::string tsharkPath;
+
+    // ip位置工具类
     IP2RegionUtil ip2RegionUtil;
 
     // 当前分析的文件路径
@@ -50,6 +59,15 @@ private:
 
     // 分析得到的所有数据包信息，存储到哈希表，key是数据包ID，value是数据包信息指针，方便根据编号获取指定数据包信息
     std::unordered_map<uint32_t, std::shared_ptr<Packet>> allPackets;
+
+    // 在线采集数据包的工作线程
+    void captureWorkThreadEntry(std::string adapterName);
+
+    // 在线分析线程
+    std::shared_ptr<std::thread> captureWorkThread;
+
+    // 是否停止抓包的标记
+    bool stopFlag;
 };
 
 
