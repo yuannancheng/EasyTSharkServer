@@ -19,7 +19,7 @@ int main(int argc, char* argv[])
     InitLog(argc, argv);
 
     TsharkManager tsharkManager("/home/ync/_project/EasyTSharkServer");
-    tsharkManager.startCapture("docker0"); // wlp1s0
+    tsharkManager.startCapture("wlp1s0");
 
     // 主线程进入命令等待停止抓包
     std::string input;

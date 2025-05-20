@@ -2,12 +2,14 @@
 // Created by ync on 25-5-15.
 //
 
+
 #include "tshark_datatype.h"
 #include "rapidjson/document.h"
 #include "rapidjson/writer.h"
 #include "rapidjson/prettywriter.h"
 #include "rapidjson/stringbuffer.h"
 #include "ip2region_util.h"
+#include <loguru/loguru.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -18,10 +20,25 @@
 #include <fstream>
 #include <thread>
 #include <unordered_map>
+#include <chrono>
+#include <iomanip>
+#include <ranges>
+#include <set>
+#include <string>
+#include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
 
 
-class TsharkManager {
+#ifdef _WIN32
+typedef DWORD PID_T;
+#else
+typedef pid_t PID_T;
+#endif
 
+
+class TsharkManager
+{
 public:
     TsharkManager(const std::string& workDir);
     ~TsharkManager();
@@ -33,7 +50,7 @@ public:
     void printAllPackets();
 
     // 获取指定编号数据包的十六进制数据
-    bool getPacketHexData(uint32_t frameNumber, std::vector<unsigned char> &data);
+    bool getPacketHexData(uint32_t frameNumber, std::vector<unsigned char>& data);
 
     // 枚举网卡列表
     std::vector<AdapterInfo> getNetworkAdapters();
@@ -42,7 +59,7 @@ public:
     bool startCapture(std::string adapterName);
 
     // 停止抓包
-    bool stopCapture();	
+    bool stopCapture();
 
 private:
     // 解析每一行
@@ -68,6 +85,19 @@ private:
 
     // 是否停止抓包的标记
     bool stopFlag;
+
+    // 在线抓包的tshark进程PID
+    PID_T captureTsharkPid = 0;
 };
 
 
+// 自己封装一个能拿到进程PID的增强版popen函数
+class ProcessUtil
+{
+public:
+    // 跨平台的PopenEx
+    static FILE* PopenEx(std::string command, PID_T* pidOut = nullptr);
+
+    // 封装一个跨平台的杀进程函数
+    static int Kill(PID_T pid);
+};

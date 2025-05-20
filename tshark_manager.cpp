@@ -3,16 +3,6 @@
 //
 
 #include "tshark_manager.h"
-#include <chrono>
-#include <iomanip>
-#include <ranges>
-#include <set>
-#include <sstream>
-#include <string>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/select.h>
-#include <loguru/loguru.hpp>
 
 // 传入工作路径workDir
 TsharkManager::TsharkManager(const std::string& workDir)
@@ -350,6 +340,7 @@ bool TsharkManager::stopCapture()
 {
     LOG_F(INFO, "即将停止抓包");
     stopFlag = true;
+    ProcessUtil::Kill(captureTsharkPid);
     captureWorkThread->join(); // 使用join方法等待抓包线程的退出，会阻塞当前线程
 
     return true;
@@ -389,77 +380,48 @@ void TsharkManager::captureWorkThreadEntry(std::string adapterName)
         command += " ";
     }
 
-    FILE* pipe = popen(command.c_str(), "r");
+    FILE* pipe = ProcessUtil::PopenEx(command.c_str(), &captureTsharkPid);
     if (!pipe)
     {
         LOG_F(ERROR, "Failed to run tshark command!");
         return;
     }
 
-
-    int fd = fileno(pipe); // 获取文件描述符
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); // 设为非阻塞
-
     char buffer[4096];
 
     // 当前处理的报文在文件中的偏移，第一个报文的偏移就是全局文件头24(也就是sizeof(PcapHeader))字节
     uint32_t file_offset = sizeof(PcapHeader);
-    while (!stopFlag)
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr && !stopFlag)
     {
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(fd, &readfds);
-
-        // 设置超时（例如 1s）
-        struct timeval timeout = {1, 0}; // 1s
-        int ret = select(fd + 1, &readfds, nullptr, nullptr, &timeout);
-
-        printf("select ret: %d, stopFlag: %d\n", ret, stopFlag);
-
-        if (ret == -1) break; // 错误
-        if (ret == 0) continue; // 超时，检查 stopFlag
-
-        if (ret > 0 && FD_ISSET(fd, &readfds))
-        // 数据可读
+        // 在线采集的时候过滤额外的信息
+        std::string line = buffer;
+        if (
+            line.find("Capturing on") != std::string::npos ||
+            line.find("packets captured") != std::string::npos
+        )
         {
-            if (fgets(buffer, sizeof(buffer), pipe) != nullptr)
-            {
-                printf("fgets: %s", buffer);
-                // 在线采集的时候过滤额外的信息
-                std::string line = buffer;
-                if (
-                    line.find("Capturing on") != std::string::npos ||
-                    line.find("packets captured") != std::string::npos
-                )
-                {
-                    continue;
-                }
-
-                std::shared_ptr<Packet> packet = std::make_shared<Packet>();
-                if (!parseLine(buffer, packet))
-                {
-                    LOG_F(ERROR, "%s", buffer);
-                    assert(false);
-                }
-
-                // 计算当前报文的偏移，然后记录在Packet对象中
-                packet->file_offset = file_offset + sizeof(PacketHeader);
-
-                // 更新偏移游标
-                file_offset = file_offset + sizeof(PacketHeader) + packet->cap_len;
-
-                // 获取IP地理位置
-                packet->src_location = IP2RegionUtil::getIpLocation(packet->src_ip);
-                packet->dst_location = IP2RegionUtil::getIpLocation(packet->dst_ip);
-
-                // 将分析的数据包插入保存起来
-                allPackets.insert(std::make_pair<>(packet->frame_number, packet));
-            }
-            else
-            {
-                break;
-            }
+            continue;
         }
+
+        std::shared_ptr<Packet> packet = std::make_shared<Packet>();
+        if (!parseLine(buffer, packet))
+        {
+            LOG_F(ERROR, "%s", buffer);
+            assert(false);
+        }
+
+        // 计算当前报文的偏移，然后记录在Packet对象中
+        packet->file_offset = file_offset + sizeof(PacketHeader);
+
+        // 更新偏移游标
+        file_offset = file_offset + sizeof(PacketHeader) + packet->cap_len;
+
+        // 获取IP地理位置
+        packet->src_location = IP2RegionUtil::getIpLocation(packet->src_ip);
+        packet->dst_location = IP2RegionUtil::getIpLocation(packet->dst_ip);
+
+        // 将分析的数据包插入保存起来
+        allPackets.insert(std::make_pair<>(packet->frame_number, packet));
     }
 
     pclose(pipe);
@@ -467,3 +429,159 @@ void TsharkManager::captureWorkThreadEntry(std::string adapterName)
     // 记录当前分析的文件路径
     currentFilePath = captureFile;
 }
+
+
+#if defined(__unix__) || defined(__APPLE__)
+// Linux/Mac平台实现PopenEx
+FILE* ProcessUtil::PopenEx(std::string command, PID_T* pidOut)
+{
+    int pipefd[2] = {0};
+    FILE* pipeFp = nullptr;
+
+    if (pipe(pipefd) == -1)
+    {
+        perror("pipe");
+        return nullptr;
+    }
+
+    pid_t pid = fork();
+    if (pid == -1)
+    {
+        perror("fork");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return nullptr;
+    }
+
+    if (pid == 0)
+    {
+        // 子进程
+        // pid 等于 0 的部分已经是子进程执行了，从 fork() 处分叉出去2份代码互不干扰地执行
+        close(pipefd[0]); // 关闭读端
+        dup2(pipefd[1], STDOUT_FILENO); // 将 stdout 重定向到管道
+        dup2(pipefd[1], STDERR_FILENO); // 将 stderr 重定向到管道
+        close(pipefd[1]);
+
+        execl("/bin/sh", "sh", "-c", command.c_str(), NULL); // 执行命令
+        _exit(1); // execl失败
+    }
+
+    // 父进程将读取管道，关闭写端
+    close(pipefd[1]);
+    pipeFp = fdopen(pipefd[0], "r");
+
+    if (pidOut)
+    {
+        *pidOut = pid;
+    }
+
+    return pipeFp;
+}
+
+// Linux/Mac平台实现杀死子进程方法
+int ProcessUtil::Kill(PID_T pid)
+{
+    return kill(pid, SIGTERM);
+}
+#endif
+
+
+#ifdef _WIN32
+// Windows平台实现PopenEx
+// 主要使用Win32的系统API函数CreatePipe创建管道，然后使用CreateProcess创建子进程。
+FILE* ProcessUtil::PopenEx(std::string command, PID_T* pidOut = nullptr) {
+
+    HANDLE hReadPipe, hWritePipe;
+    SECURITY_ATTRIBUTES saAttr;
+    PROCESS_INFORMATION piProcInfo;
+    STARTUPINFO siStartInfo;
+    FILE* pipeFp = nullptr;
+
+    // 设置安全属性，允许管道句柄继承
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = nullptr;
+
+    // 创建匿名管道
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &saAttr, 0)) {
+        perror("CreatePipe");
+        return nullptr;
+    }
+
+    // 确保读句柄不被子进程继承
+    if (!SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0)) {
+        perror("SetHandleInformation");
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return nullptr;
+    }
+
+    // 初始化 STARTUPINFO 结构体
+    ZeroMemory(&piProcInfo, sizeof(PROCESS_INFORMATION));
+    ZeroMemory(&siStartInfo, sizeof(STARTUPINFO));
+    siStartInfo.cb = sizeof(STARTUPINFO);
+    siStartInfo.hStdError = hWritePipe;
+    siStartInfo.hStdOutput = hWritePipe;
+    siStartInfo.dwFlags |= STARTF_USESTDHANDLES;
+
+    // 创建子进程
+    if (!CreateProcess(
+        nullptr,                        // No module name (use command line)
+        (LPSTR)command.data(),          // Command line
+        nullptr,                        // Process handle not inheritable
+        nullptr,                        // Thread handle not inheritable
+        TRUE,                           // Set handle inheritance
+        CREATE_NO_WINDOW,               // No window
+        nullptr,                        // Use parent's environment block
+        nullptr,                        // Use parent's starting directory
+        &siStartInfo,                   // Pointer to STARTUPINFO structure
+        &piProcInfo                     // Pointer to PROCESS_INFORMATION structure
+    )) {
+        perror("CreateProcess");
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return nullptr;
+    }
+
+    // 关闭写端句柄（父进程不使用）
+    CloseHandle(hWritePipe);
+
+    // 返回子进程 PID
+    if (pidOut) {
+        *pidOut = piProcInfo.dwProcessId;
+    }
+
+    // 将管道的读端转换为 FILE* 并返回
+    pipeFp = _fdopen(_open_osfhandle(reinterpret_cast<intptr_t>(hReadPipe), _O_RDONLY), "r");
+    if (!pipeFp) {
+        CloseHandle(hReadPipe);
+    }
+
+    // 关闭进程句柄（不需要等待子进程）
+    CloseHandle(piProcInfo.hProcess);
+    CloseHandle(piProcInfo.hThread);
+
+    return pipeFp;
+}
+
+int ProcessUtil::Kill(PID_T pid) {
+
+    // 打开指定进程
+    HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (hProcess == nullptr) {
+        std::cout << "Failed to open process with PID " << pid << ", error: " << GetLastError() << std::endl;
+        return -1;
+    }
+
+    // 终止进程
+    if (!TerminateProcess(hProcess, 0)) {
+        std::cout << "Failed to terminate process with PID " << pid << ", error: " << GetLastError() << std::endl;
+        CloseHandle(hProcess);
+        return -1;
+    }
+
+    // 成功终止进程
+    CloseHandle(hProcess);
+    return 0;
+}
+#endif
