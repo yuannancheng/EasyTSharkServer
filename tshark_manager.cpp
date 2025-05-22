@@ -3,6 +3,8 @@
 //
 
 #include "tshark_manager.h"
+#include <iomanip>
+#include "loguru/loguru.hpp"
 
 // 传入工作路径workDir
 TsharkManager::TsharkManager(const std::string& workDir)
@@ -246,21 +248,25 @@ bool TsharkManager::getPacketHexData(uint32_t frameNumber, std::vector<unsigned 
 std::vector<AdapterInfo> TsharkManager::getNetworkAdapters()
 {
     // 需要过滤掉的虚拟网卡，这些不是真实的网卡。tshark -D命令可能会输出这些，把它过滤掉
-    std::set<std::string> specialInterfaces = {"sshdump", "ciscodump", "udpdump", "randpkt"};
+    std::set<std::string> specialInterfaces = {
+        "sshdump", "ciscodump", "udpdump", "randpkt", "nflog", "nfqueue", "dpauxmon", "wifidump"
+    };
+
 
     // 枚举到的网卡列表
     std::vector<AdapterInfo> interfaces;
 
     const std::string command = tsharkPath + " -D";
 
-    FILE* pipe = popen(command.c_str(), "r");
+    // 使用智能指针自动关闭
+    std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(command.c_str(), "r"), pclose);
     if (!pipe)
     {
         throw std::runtime_error("Failed to run tshark command.");
     }
 
     char buffer[256] = {0};
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+    while (fgets(buffer, sizeof(buffer), pipe.get()) != nullptr)
     {
         std::string line(buffer);
         // 去掉末尾换行符
@@ -286,9 +292,17 @@ std::vector<AdapterInfo> TsharkManager::getNetworkAdapters()
         }
         else
         {
-            // 有三段,把最后一个拿到前面,中间的放到后面
-            interfaceName = line.substr(second + 1);
-            remark = line.substr(first + 1, second - first - 1);
+            // 有三段，默认为unix输出，第二段为名字，第三段为备注名
+            interfaceName = line.substr(first + 1, second - first - 1);
+            remark = line.substr(second + 1);
+
+            // 但假如第二段是 \ 开头，则是Windows输出，需要交换位置
+            if (interfaceName.starts_with('\\'))
+            {
+                auto tempName = interfaceName;
+                interfaceName = remark;
+                remark = interfaceName;
+            }
         }
 
         // 滤掉特殊网卡
@@ -300,12 +314,10 @@ std::vector<AdapterInfo> TsharkManager::getNetworkAdapters()
             continue;
         }
 
-        // 清理第一段的前后空格
-        interfaceName = interfaceName.starts_with('(') ? interfaceName.erase(0, 1) : interfaceName;
-        if (interfaceName.ends_with(')')) interfaceName.pop_back();
+        // 清理第二段的前后括号
+        remark = remark.starts_with('(') ? remark.erase(0, 1) : remark;
+        if (remark.ends_with(')')) remark.pop_back();
 
-        // 假如第二段是 \ 开头,则是Windows输出,那么清空
-        remark = remark.starts_with('\\') ? "" : remark;
 
         AdapterInfo adapterInfo;
         adapterInfo.name = interfaceName;
@@ -314,8 +326,6 @@ std::vector<AdapterInfo> TsharkManager::getNetworkAdapters()
 
         interfaces.push_back(adapterInfo);
     }
-
-    pclose(pipe);
 
     return interfaces;
 }
@@ -430,158 +440,194 @@ void TsharkManager::captureWorkThreadEntry(std::string adapterName)
     currentFilePath = captureFile;
 }
 
-
-#if defined(__unix__) || defined(__APPLE__)
-// Linux/Mac平台实现PopenEx
-FILE* ProcessUtil::PopenEx(std::string command, PID_T* pidOut)
+void TsharkManager::clearFlowTrendData()
 {
-    int pipefd[2] = {0};
-    FILE* pipeFp = nullptr;
-
-    if (pipe(pipefd) == -1)
-    {
-        perror("pipe");
-        return nullptr;
-    }
-
-    pid_t pid = fork();
-    if (pid == -1)
-    {
-        perror("fork");
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return nullptr;
-    }
-
-    if (pid == 0)
-    {
-        // 子进程
-        // pid 等于 0 的部分已经是子进程执行了，从 fork() 处分叉出去2份代码互不干扰地执行
-        close(pipefd[0]); // 关闭读端
-        dup2(pipefd[1], STDOUT_FILENO); // 将 stdout 重定向到管道
-        dup2(pipefd[1], STDERR_FILENO); // 将 stderr 重定向到管道
-        close(pipefd[1]);
-
-        execl("/bin/sh", "sh", "-c", command.c_str(), NULL); // 执行命令
-        _exit(1); // execl失败
-    }
-
-    // 父进程将读取管道，关闭写端
-    close(pipefd[1]);
-    pipeFp = fdopen(pipefd[0], "r");
-
-    if (pidOut)
-    {
-        *pidOut = pid;
-    }
-
-    return pipeFp;
+    adapterFlowTrendMapLock.lock();
+    adapterFlowTrendMonitorMap.clear();
+    adapterFlowTrendMapLock.unlock();
 }
 
-// Linux/Mac平台实现杀死子进程方法
-int ProcessUtil::Kill(PID_T pid)
+
+// 开始监控所有网卡流量统计数据
+void TsharkManager::startMonitorAdaptersFlowTrend()
 {
-    return kill(pid, SIGTERM);
-}
-#endif
+    // 函数进来后，先要获取锁，防止等会创建的其他监控线程访问这个map出问题。
+    std::unique_lock<std::recursive_mutex> lock(adapterFlowTrendMapLock);
 
+    clearFlowTrendData();
+    adapterFlowTrendMonitorStartTime = time(nullptr);
 
-#ifdef _WIN32
-// Windows平台实现PopenEx
-// 主要使用Win32的系统API函数CreatePipe创建管道，然后使用CreateProcess创建子进程。
-FILE* ProcessUtil::PopenEx(std::string command, PID_T* pidOut = nullptr) {
+    // 第一步：获取网卡列表
+    std::vector<AdapterInfo> adapterList = getNetworkAdapters();
 
-    HANDLE hReadPipe, hWritePipe;
-    SECURITY_ATTRIBUTES saAttr;
-    PROCESS_INFORMATION piProcInfo;
-    STARTUPINFO siStartInfo;
-    FILE* pipeFp = nullptr;
+    // 第二步：每个网卡启动一个线程，统计对应网卡的数据
+    for (auto adapter : adapterList)
+    {
+        // 准备一个AdapterMonitorInfo对象，放到类的adapterFlowTrendMonitorMap成员中。
+        adapterFlowTrendMonitorMap.insert(std::make_pair<>(adapter.name, AdapterMonitorInfo()));
+        AdapterMonitorInfo& monitorInfo = adapterFlowTrendMonitorMap.at(adapter.name);
 
-    // 设置安全属性，允许管道句柄继承
-    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-    saAttr.bInheritHandle = TRUE;
-    saAttr.lpSecurityDescriptor = nullptr;
-
-    // 创建匿名管道
-    if (!CreatePipe(&hReadPipe, &hWritePipe, &saAttr, 0)) {
-        perror("CreatePipe");
-        return nullptr;
+        // 创建一个线程，在这个线程中完成对这个网卡的流量数据监控。
+        // 把线程指针保存到刚刚准备的AdapterMonitorInfo对象中。
+        monitorInfo.monitorThread = std::make_shared<std::thread>(&TsharkManager::adapterFlowTrendMonitorThreadEntry,
+                                                                  this, adapter.name);
+        if (monitorInfo.monitorThread == nullptr)
+        {
+            LOG_F(ERROR, "监控线程创建失败，网卡名：%s", adapter.name.c_str());
+        }
+        else
+        {
+            LOG_F(INFO, "监控线程创建成功，网卡名：%s，monitorThread: %p", adapter.name.c_str(), monitorInfo.monitorThread.get());
+        }
     }
-
-    // 确保读句柄不被子进程继承
-    if (!SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0)) {
-        perror("SetHandleInformation");
-        CloseHandle(hReadPipe);
-        CloseHandle(hWritePipe);
-        return nullptr;
-    }
-
-    // 初始化 STARTUPINFO 结构体
-    ZeroMemory(&piProcInfo, sizeof(PROCESS_INFORMATION));
-    ZeroMemory(&siStartInfo, sizeof(STARTUPINFO));
-    siStartInfo.cb = sizeof(STARTUPINFO);
-    siStartInfo.hStdError = hWritePipe;
-    siStartInfo.hStdOutput = hWritePipe;
-    siStartInfo.dwFlags |= STARTF_USESTDHANDLES;
-
-    // 创建子进程
-    if (!CreateProcess(
-        nullptr,                        // No module name (use command line)
-        (LPSTR)command.data(),          // Command line
-        nullptr,                        // Process handle not inheritable
-        nullptr,                        // Thread handle not inheritable
-        TRUE,                           // Set handle inheritance
-        CREATE_NO_WINDOW,               // No window
-        nullptr,                        // Use parent's environment block
-        nullptr,                        // Use parent's starting directory
-        &siStartInfo,                   // Pointer to STARTUPINFO structure
-        &piProcInfo                     // Pointer to PROCESS_INFORMATION structure
-    )) {
-        perror("CreateProcess");
-        CloseHandle(hReadPipe);
-        CloseHandle(hWritePipe);
-        return nullptr;
-    }
-
-    // 关闭写端句柄（父进程不使用）
-    CloseHandle(hWritePipe);
-
-    // 返回子进程 PID
-    if (pidOut) {
-        *pidOut = piProcInfo.dwProcessId;
-    }
-
-    // 将管道的读端转换为 FILE* 并返回
-    pipeFp = _fdopen(_open_osfhandle(reinterpret_cast<intptr_t>(hReadPipe), _O_RDONLY), "r");
-    if (!pipeFp) {
-        CloseHandle(hReadPipe);
-    }
-
-    // 关闭进程句柄（不需要等待子进程）
-    CloseHandle(piProcInfo.hProcess);
-    CloseHandle(piProcInfo.hThread);
-
-    return pipeFp;
 }
 
-int ProcessUtil::Kill(PID_T pid) {
+// 停止监控所有网卡流量统计数据
+void TsharkManager::stopMonitorAdaptersFlowTrend()
+{
+    std::unique_lock<std::recursive_mutex> lock(adapterFlowTrendMapLock);
 
-    // 打开指定进程
-    HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
-    if (hProcess == nullptr) {
-        std::cout << "Failed to open process with PID " << pid << ", error: " << GetLastError() << std::endl;
-        return -1;
+    // 先杀死对应的tshark进程
+    for (auto adapterPipePair : adapterFlowTrendMonitorMap)
+    {
+        ProcessUtil::Kill(adapterPipePair.second.tsharkPid);
     }
 
-    // 终止进程
-    if (!TerminateProcess(hProcess, 0)) {
-        std::cout << "Failed to terminate process with PID " << pid << ", error: " << GetLastError() << std::endl;
-        CloseHandle(hProcess);
-        return -1;
+    // 然后关闭管道
+    for (auto adapterPipePair : adapterFlowTrendMonitorMap)
+    {
+        // 然后关闭管道
+        pclose(adapterPipePair.second.monitorTsharkPipe);
+
+        if (adapterPipePair.second.monitorThread == nullptr)
+        {
+            LOG_F(ERROR, "发现监控线程nullptr，网卡名：%s", adapterPipePair.first.c_str());
+            continue;
+        }
+
+        // 最后等待对应线程退出
+        adapterPipePair.second.monitorThread->join();
+
+        LOG_F(INFO, "网卡：%s 流量监控已停止", adapterPipePair.first.c_str());
     }
 
-    // 成功终止进程
-    CloseHandle(hProcess);
-    return 0;
+    // 清空记录的流量趋势数据
+    adapterFlowTrendMonitorMap.clear();
 }
-#endif
+
+// 获取所有网卡流量统计数据
+void TsharkManager::getAdaptersFlowTrendData(std::map<std::string, std::map<long, long>>& flowTrendData)
+{
+    long timeNow = time(nullptr);
+
+    // 数据从最左边冒出来
+    // 一开始：以最开始监控时间为左起点，终点为未来300秒
+    // 随着时间推移，数据逐渐填充完这300秒
+    // 超过300秒之后，结束节点就是当前，开始节点就是当前-300
+    long startWindow = timeNow - adapterFlowTrendMonitorStartTime > 300
+                           ? timeNow - 300
+                           : adapterFlowTrendMonitorStartTime;
+    long endWindow = timeNow - adapterFlowTrendMonitorStartTime > 300
+                         ? timeNow
+                         : adapterFlowTrendMonitorStartTime + 300;
+
+    adapterFlowTrendMapLock.lock();
+    for (auto adapterPipePair : adapterFlowTrendMonitorMap)
+    {
+        flowTrendData.insert(std::make_pair<>(adapterPipePair.first, std::map<long, long>()));
+
+        // 从当前时间戳向前倒推300秒，构造map
+        for (long t = startWindow; t <= endWindow; t++)
+        {
+            // 如果trafficPerSecond中存在该时间戳，则使用已有数据；否则填充为0
+            if (adapterPipePair.second.flowTrendData.find(t) != adapterPipePair.second.flowTrendData.end())
+            {
+                flowTrendData[adapterPipePair.first][t] = adapterPipePair.second.flowTrendData.at(t);
+            }
+            else
+            {
+                flowTrendData[adapterPipePair.first][t] = 0;
+            }
+        }
+    }
+
+    adapterFlowTrendMapLock.unlock();
+}
+
+// 获取指定网卡的流量趋势数据
+void TsharkManager::adapterFlowTrendMonitorThreadEntry(std::string adapterName)
+{
+    if (adapterFlowTrendMonitorMap.find(adapterName) == adapterFlowTrendMonitorMap.end())
+    {
+        return;
+    }
+
+    char buffer[256] = {0};
+    std::map<long, long>& trafficPerSecond = adapterFlowTrendMonitorMap[adapterName].flowTrendData;
+
+    // Tshark命令，指定网卡，实时捕获时间戳和数据包长度
+    std::string tsharkCmd = tsharkPath + " -i \"" + adapterName + "\" -T fields -e frame.time_epoch -e frame.len";
+
+    LOG_F(INFO, "启动网卡流量监控: %s", tsharkCmd.c_str());
+
+    PID_T tsharkPid = 0;
+    FILE* pipe = ProcessUtil::PopenEx(tsharkCmd.c_str(), &tsharkPid);
+    if (!pipe)
+    {
+        throw std::runtime_error("Failed to run tshark command.");
+    }
+
+    // 将管道保存起来
+    // 此处是否有必要加锁？
+    adapterFlowTrendMapLock.lock();
+    adapterFlowTrendMonitorMap[adapterName].monitorTsharkPipe = pipe;
+    adapterFlowTrendMonitorMap[adapterName].tsharkPid = tsharkPid;
+    adapterFlowTrendMapLock.unlock();
+
+    // 逐行读取tshark输出
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+    {
+        std::string line(buffer);
+        std::istringstream iss(line); // 用字符串初始化流
+        std::string timestampStr, lengthStr;
+
+        if (line.find("Capturing") != std::string::npos || line.find("captured") != std::string::npos)
+        {
+            continue;
+        }
+
+        // 从流中提取数据：解析每行的时间戳和数据包长度
+        if (!(iss >> timestampStr >> lengthStr))
+        {
+            continue;
+        }
+
+        try
+        {
+            // 直接用 std::stol 遇到小数会报错
+            long timestamp = static_cast<long>(std::stod(timestampStr)); // 转换时间戳为long类型，秒数部分
+
+            // 转换数据包长度为long类型
+            long packetLength = std::stol(lengthStr);
+
+            // 每秒的字节数累加
+            trafficPerSecond[timestamp] += packetLength;
+
+            // 如果trafficPerSecond超过300秒，则删除最早的数据，始终只存储最近300秒的数据
+            while (trafficPerSecond.size() > 300)
+            {
+                // 访问并删除最早的时间戳数据
+                auto it = trafficPerSecond.begin();
+                LOG_F(INFO, "Removing old data for second: %ld, Traffic: %ld bytes", it->first, it->second);
+                trafficPerSecond.erase(it);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            // 处理转换错误
+            LOG_F(ERROR, "Error parsing tshark output: %s", line.c_str());
+        }
+    }
+
+    LOG_F(INFO, "adapterFlowTrendMonitorThreadEntry 已结束");
+}

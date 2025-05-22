@@ -9,7 +9,7 @@
 #include "rapidjson/prettywriter.h"
 #include "rapidjson/stringbuffer.h"
 #include "ip2region_util.h"
-#include <loguru/loguru.hpp>
+#include "process_util.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -19,22 +19,10 @@
 #include <iostream>
 #include <fstream>
 #include <thread>
-#include <unordered_map>
-#include <chrono>
-#include <iomanip>
-#include <ranges>
 #include <set>
-#include <string>
-#include <unistd.h>
-#include <fcntl.h>
-#include <signal.h>
-
-
-#ifdef _WIN32
-typedef DWORD PID_T;
-#else
-typedef pid_t PID_T;
-#endif
+#include <map>
+#include <unordered_map>
+#include <mutex>
 
 
 class TsharkManager
@@ -60,6 +48,21 @@ public:
 
     // 停止抓包
     bool stopCapture();
+
+    // 获取指定网卡的流量趋势数据
+    void adapterFlowTrendMonitorThreadEntry(std::string adapterName);
+
+    // 清空流量监控数据
+    void clearFlowTrendData();
+
+    // 开始监控所有网卡流量统计数据
+    void startMonitorAdaptersFlowTrend();
+
+    // 停止监控所有网卡流量统计数据
+    void stopMonitorAdaptersFlowTrend();
+
+    // 获取所有网卡流量统计数据
+    void getAdaptersFlowTrendData(std::map<std::string, std::map<long, long>>& flowTrendData);
 
 private:
     // 解析每一行
@@ -88,16 +91,33 @@ private:
 
     // 在线抓包的tshark进程PID
     PID_T captureTsharkPid = 0;
-};
 
+    // 网卡监控相关的信息
+    class AdapterMonitorInfo
+    {
+    public:
+        AdapterMonitorInfo()
+        {
+            monitorTsharkPipe = nullptr;
+            tsharkPid = 0;
+        }
 
-// 自己封装一个能拿到进程PID的增强版popen函数
-class ProcessUtil
-{
-public:
-    // 跨平台的PopenEx
-    static FILE* PopenEx(std::string command, PID_T* pidOut = nullptr);
+        std::string adapterName; // 网卡名称
+        std::map<long, long> flowTrendData; // 流量趋势数据
+        std::shared_ptr<std::thread> monitorThread; // 负责监控该网卡输出的线程
+        FILE* monitorTsharkPipe; // 线程与tshark通信的管道
+        PID_T tsharkPid; // 负责捕获该网卡数据的tshark进程PID
+    };
 
-    // 封装一个跨平台的杀进程函数
-    static int Kill(PID_T pid);
+    // 后台流量趋势监控信息
+    std::map<std::string, AdapterMonitorInfo> adapterFlowTrendMonitorMap;
+
+    // 写上面流量趋势数据的锁
+    // 这里使用的是recursive_mutex，可以递归获取的锁，就是说同一个线程可以多次加锁。
+    // 如果使用非递归的std::mutex的话，如果一个线程之前已经获取了锁，
+    // 在没有释放的时候，又来获取就会自己被自己锁住。建议使用可递归的锁。
+    std::recursive_mutex adapterFlowTrendMapLock;
+
+    // 开始抓包时间戳
+    time_t adapterFlowTrendMonitorStartTime = 0;
 };
