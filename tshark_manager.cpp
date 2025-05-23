@@ -493,19 +493,21 @@ void TsharkManager::stopMonitorAdaptersFlowTrend()
         ProcessUtil::Kill(adapterPipePair.second.tsharkPid);
     }
 
-    // 然后关闭管道
+    // 等待线程结束并关闭管道
     for (auto adapterPipePair : adapterFlowTrendMonitorMap)
     {
-        // 然后关闭管道
+        // 关闭读取管道
         pclose(adapterPipePair.second.monitorTsharkPipe);
 
         if (adapterPipePair.second.monitorThread == nullptr)
         {
             LOG_F(ERROR, "发现监控线程nullptr，网卡名：%s", adapterPipePair.first.c_str());
+            // 关闭读取管道
+            pclose(adapterPipePair.second.monitorTsharkPipe);
             continue;
         }
 
-        // 最后等待对应线程退出
+        // 等待对应线程退出
         adapterPipePair.second.monitorThread->join();
 
         LOG_F(INFO, "网卡：%s 流量监控已停止", adapterPipePair.first.c_str());

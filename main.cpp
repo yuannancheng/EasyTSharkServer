@@ -23,50 +23,63 @@ int main(int argc, char* argv[])
     // 启动监控
     tsharkManager.startMonitorAdaptersFlowTrend();
 
-    try
+    // 睡眠10秒，等待监控网卡数据
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+
+    // 读取监控到的数据
+    std::map<std::string, std::map<long, long>> trendData;
+    tsharkManager.getAdaptersFlowTrendData(trendData);
+
+    // 停止监控
+    tsharkManager.stopMonitorAdaptersFlowTrend();
+
+    // 把获取到的数据打印输出
+    rapidjson::Document resDoc;
+    rapidjson::Document::AllocatorType& allocator = resDoc.GetAllocator();
+    resDoc.SetObject();
+    rapidjson::Value dataObject(rapidjson::kObjectType);
+    for (const auto& adaptorItem : trendData)
     {
-        // 睡眠10秒，等待监控网卡数据
-        std::this_thread::sleep_for(std::chrono::seconds(10));
-
-        // 读取监控到的数据
-        std::map<std::string, std::map<long, long>> trendData;
-        tsharkManager.getAdaptersFlowTrendData(trendData);
-
-        // 停止监控
-        tsharkManager.stopMonitorAdaptersFlowTrend();
-
-        // 把获取到的数据打印输出
-        rapidjson::Document resDoc;
-        rapidjson::Document::AllocatorType& allocator = resDoc.GetAllocator();
-        resDoc.SetObject();
-        rapidjson::Value dataObject(rapidjson::kObjectType);
-        for (const auto& adaptorItem : trendData)
+        rapidjson::Value adaptorDataList(rapidjson::kArrayType);
+        for (const auto& timeItem : adaptorItem.second)
         {
-            rapidjson::Value adaptorDataList(rapidjson::kArrayType);
-            for (const auto& timeItem : adaptorItem.second)
-            {
-                rapidjson::Value timeObj(rapidjson::kObjectType);
-                timeObj.AddMember("time", (unsigned int)timeItem.first, allocator);
-                timeObj.AddMember("bytes", (unsigned int)timeItem.second, allocator);
-                adaptorDataList.PushBack(timeObj, allocator);
-            }
-
-            dataObject.AddMember(rapidjson::StringRef(adaptorItem.first.c_str()), adaptorDataList, allocator);
+            rapidjson::Value timeObj(rapidjson::kObjectType);
+            timeObj.AddMember("time", (unsigned int)timeItem.first, allocator);
+            timeObj.AddMember("bytes", (unsigned int)timeItem.second, allocator);
+            adaptorDataList.PushBack(timeObj, allocator);
         }
 
-        resDoc.AddMember("data", dataObject, allocator);
-
-        // 序列化为 JSON 字符串
-        rapidjson::StringBuffer buffer;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-        resDoc.Accept(writer);
-
-        LOG_F(INFO, "网卡流量监控数据: %s", buffer.GetString());
+        dataObject.AddMember(rapidjson::StringRef(adaptorItem.first.c_str()), adaptorDataList, allocator);
     }
-    catch (const std::exception& e)
-    {
-        LOG_F(ERROR, "错误：%s", e.what());
-    }
+
+    resDoc.AddMember("data", dataObject, allocator);
+
+    // 序列化为 JSON 字符串
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    resDoc.Accept(writer);
+
+    LOG_F(INFO, "网卡流量监控数据: %s", buffer.GetString());
+
+
+    // 在线抓包指定网卡
+    // tsharkManager.startCapture("docker0"); // wlp1s0
+
+    // 主线程进入命令等待停止抓包
+    // std::string input;
+    // while (true)
+    // {
+    //     std::cout << "请输入q退出抓包: ";
+    //     std::cin >> input;
+    //     if (input == "q")
+    //     {
+    //         tsharkManager.stopCapture();
+    //         break;
+    //     }
+    // }
+    //
+    // // 打印所有捕获到的数据包信息
+    // tsharkManager.printAllPackets();
 
     return 0;
 }

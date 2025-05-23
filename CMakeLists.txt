@@ -26,3 +26,7 @@ configure_file(
         ${CMAKE_CURRENT_BINARY_DIR}/ip2region/ip2region.xdb
         COPYONLY
 )
+
+# 检查内存问题
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fno-omit-frame-pointer")
+#set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS} -fsanitize=address")
